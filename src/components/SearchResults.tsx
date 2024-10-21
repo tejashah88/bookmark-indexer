@@ -70,14 +70,14 @@ export default function SearchResults({ searchQuery, results, elapsedTime }: Sea
             {results.map((entry, index) => (
               <Box key={index}>
                 <Heading size="sm">
-                  <Highlight query={searchQuery} styles={{ px: '1', py: '1', bg: 'orange.100' }}>
+                  <Highlight query={searchQuery.split(' ')} styles={{ px: '1', py: '1', bg: 'orange.100' }}>
                     {entry.title}
                   </Highlight>
                 </Heading>
 
                 {fetchAllSearchPositions(entry.content, searchQuery).slice(0, 3).map(posIndex => (
                   <Text key={posIndex} py="0" fontSize="sm">
-                    <Highlight query={searchQuery} styles={{ px: '1', py: '1', bg: 'orange.100' }}>
+                    <Highlight query={searchQuery.split(' ')} styles={{ px: '1', py: '1', bg: 'orange.100' }}>
                       {`▶ ${showSearchedTextContext(entry.content, searchQuery, 50, posIndex)}`}
                     </Highlight>
                   </Text>
