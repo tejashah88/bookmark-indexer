@@ -5,11 +5,7 @@ export interface BookmarkEntry {
 }
 
 
-
-export interface BookmarkEntryWithScore {
-  url: string;
-  title: string;
-  content: string;
+export interface BookmarkEntryWithScore extends BookmarkEntry {
   score: number;
 }
 

@@ -1,3 +1,5 @@
+// Utility class to track and calculate overall progress based on subtask progress updates.
+// Allows for arbitrary number of subtasks and customizable weights for each subtask's progress.
 export default class ProgressTracker {
   values: number[];
   weights: number[];
@@ -14,6 +16,8 @@ export default class ProgressTracker {
     }
   }
 
+
+  // Update the subtask progress values and recalculate overall progress
   updateProgress(values: number[]) {
     if (this.values.length !== values.length) {
       throw new Error('Passed value  array does not match number of progress values to track.')
@@ -23,6 +27,9 @@ export default class ProgressTracker {
     return this.calcTotalProgress();
   }
 
+
+  // Calculate the overall progress based on the following formula
+  //  - Formula: sum(v[i] * w[i]) / sum(w[i])
   calcTotalProgress(): number {
     let numerator: number = 0;
     let denominator: number = 0;
@@ -32,6 +39,7 @@ export default class ProgressTracker {
       denominator += this.weights[i];
     }
 
-    return +(numerator / denominator).toFixed(3);
+    // Report progress to 4 decimal places (XX.XX %)
+    return +(numerator / denominator).toFixed(4);
   }
 }

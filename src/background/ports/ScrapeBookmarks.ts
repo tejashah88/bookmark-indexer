@@ -3,9 +3,19 @@ import type { PlasmoMessaging } from "@plasmohq/messaging";
 import BookmarkScrapeEngine from '~/src/services/BookmarkScrapeService';
 import BookmarkSearchEngine from '~/src/services/BookmarkSearchService';
 import type { BookmarkDatabase } from "~/src/interfaces/data-interfaces";
-import type { ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody } from "~/src/interfaces/port-interfaces";
 import LocalStorageService from "~/src/services/LocalStorageService";
 import { generatePortHelperMethods } from "~/src/utils/port-messaging";
+
+
+export type ScrapeBookmarksRequestBody = {
+  command: string;
+}
+
+export type ScrapeBookmarksResponseBody = {
+  progress: number;
+  done: boolean;
+  error: Error;
+}
 
 
 const handler: PlasmoMessaging.PortHandler<ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody> = async (req, res) => {
@@ -18,7 +28,7 @@ const handler: PlasmoMessaging.PortHandler<ScrapeBookmarksRequestBody, ScrapeBoo
   });
 
   if (req.body?.command !== 'start') {
-    console.warn(`WARNING: Attempted to initiate unknown command "${req.body?.command}" from the "scrape bookmarks" service`)
+    console.warn(`WARNING: Attempted to initiate unknown command "${req.body?.command}" from the "scrape bookmarks" port`)
     return;
   }
 
@@ -27,10 +37,14 @@ const handler: PlasmoMessaging.PortHandler<ScrapeBookmarksRequestBody, ScrapeBoo
   const storageNg = LocalStorageService.instance;
 
   try {
+    // Fetch old copy of database
     const oldData: BookmarkDatabase = await searchNg.fetchDatabase();
+
+    // Start new scraping session
     const scanResults = await scrapeNg.scanBookmarkLinks(
       oldData,
       false,
+      // Call every time a new progress update is reported by the scraping service
       async (progress: number) => {
         attemptResponseSend({
           progress: progress,
@@ -38,11 +52,13 @@ const handler: PlasmoMessaging.PortHandler<ScrapeBookmarksRequestBody, ScrapeBoo
           error: null,
         });
       },
+      // Call every time a backup of the database is requested by the scraping service
       async (mappingCheckpoint: BookmarkDatabase) => {
         await storageNg.persistDatabase(mappingCheckpoint);
       }
     );
 
+    // Save a copy of the database and reload the search indices
     await searchNg.syncScanContent(scanResults);
   } catch (error) {
     console.error('UNEXPECTED ERROR IN scrape-bookmarks.handler')

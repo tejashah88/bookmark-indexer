@@ -1,8 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-
 import type { PlasmoMessaging, PortsMetadata } from '@plasmohq/messaging';
-import { listen as portListen } from '@plasmohq/messaging/port';
 
+// Utility method to safely attempt sending response via message port
 export function generatePortHelperMethods<
   RequestBody = any,
   ResponseBody = any

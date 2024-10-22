@@ -15,64 +15,54 @@ import {
 
 import React, { useEffect, useState } from 'react';
 import { usePort } from "@plasmohq/messaging/hook";
-
 import { FaInfoCircle, FaSync, FaTrashAlt } from 'react-icons/fa';
 
 import SearchResults from '~/src/components/SearchResults';
-import type {
-  ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody,
-  SearchBookmarksRequestBody, SearchBookmarksResponseBody,
-  SearchReadyRequestBody, SearchReadyResponseBody
-} from '~/src/interfaces/port-interfaces';
+import LocalStorageService, { type StorageStats } from '~/src/services/LocalStorageService';
+import BookmarkSearchEngine from '~/src/services/BookmarkSearchService';
+
+import type { ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody } from '~/src/background/ports/ScrapeBookmarks';
+import type { SearchBookmarksRequestBody, SearchBookmarksResponseBody } from '~/src/background/ports/SearchBookmarks';
+import type { SearchReadyRequestBody, SearchReadyResponseBody } from '~/src/background/ports/SearchReady';
+
 import '~/src/popup.css';
-import LocalStorageService from './services/LocalStorageService';
-import BookmarkSearchEngine from './services/BookmarkSearchService';
 
-
-// TODO/HACK: Too lazy to make it's own port/message, will do if necessary (Tejas Shah - 10/13/2024)
-async function TMP_fetchStorageInfo() {
-  const rawData: string = await LocalStorageService.instance.fetchRawDatabase();
-  const numIndexedBookmarks = Object.keys(JSON.parse(rawData)).length;
-  const storageSize = rawData.length;
-
-  return {
-    numIndexedBookmarks,
-    storageSize,
-  }
-}
-
-
+// Main UI for popup page
 export default function PopupPage() {
-  const [search, setSearch] = useState('');
-
   const scanBookmarksPort = usePort<ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody>('ScrapeBookmarks');
   const searchBookmarksPort = usePort<SearchBookmarksRequestBody, SearchBookmarksResponseBody>('SearchBookmarks');
   const searchReadyPort = usePort<SearchReadyRequestBody, SearchReadyResponseBody>('SearchReady');
 
+
+  // Call this function to pre-emptively listn to when the search engine service is ready
   function listenToIsReady(): void {
     searchReadyPort.send({ command: 'start' });
   }
 
+
+  // Call this function to execute a search query
   function doSearchRequest(queryString: string): void {
     searchBookmarksPort.send({ queryString });
   }
 
+
   const isSearchReady = typeof searchReadyPort.data !== 'undefined' && searchReadyPort.data?.isReady;
   const isBusy = typeof scanBookmarksPort.data !== 'undefined' && !scanBookmarksPort.data?.done;
-  // HELP: This (searchBarIsEmpty) is apparently needed because even if the search results return an empty array from a
-  // blank string, the SearchResults.tsx component is still trying to render?? (Could be a "dev" mode situation??)
-  const searchBarIsEmpty = search.length > 0;
   const hasSearchResults = typeof searchBookmarksPort.data !== 'undefined' && searchBookmarksPort.data?.results.length > 0;
 
+
+  const toast = useToast();
+  const [search, setSearch] = useState('');
+
+  // Initialize an 'on ready' listener to control if the 'Search' button should
+  // be enabled or not based on the status of the search engine service.
   useEffect(() => {
     listenToIsReady();
-
     return () => {
       BookmarkSearchEngine.instance.unsubscribeOnReady();
     };
   }, []);
 
-  const toast = useToast();
 
   return (
     <ChakraProvider>
@@ -101,7 +91,7 @@ export default function PopupPage() {
             aria-label="Show Technical Information"
             icon={<FaInfoCircle />}
             onClick={async () => {
-              const { numIndexedBookmarks, storageSize } = await TMP_fetchStorageInfo();
+              const { numIndexedBookmarks, storageSize } = await LocalStorageService.instance.fetchStorageStats();
               const infoLines = [
                 `Number of indexed bookmarks: ${numIndexedBookmarks}`,
                 `Storage size of documents: ${(storageSize / (1024 * 1024)).toFixed(2)} MB`,
@@ -130,6 +120,7 @@ export default function PopupPage() {
             }}
           />
 
+          {/* NOTE: Not using options UI */}
           {/* <IconButton
             mx="1"
             aria-label="Open Options"
@@ -144,6 +135,7 @@ export default function PopupPage() {
             icon={<FaTrashAlt />}
             bgColor="red.300"
             onClick={async () => {
+              // Nuke the database and reinitialize the search engine
               await LocalStorageService.instance.resetDatabase();
               await BookmarkSearchEngine.instance.reinitialize();
 
@@ -180,7 +172,11 @@ export default function PopupPage() {
           </InputRightElement>
         </InputGroup>
 
-        {hasSearchResults && searchBarIsEmpty &&
+        {/*
+          HACK: 'search.length > 0' is apparently needed because even if the search results return an empty array from a
+          blank string, the SearchResults.tsx component is still trying to render?? (Could be a "dev" mode situation??)
+        */}
+        {hasSearchResults && search.length > 0 &&
           <SearchResults
             searchQuery={search}
             results={searchBookmarksPort.data?.results}

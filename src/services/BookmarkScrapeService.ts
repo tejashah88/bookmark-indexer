@@ -2,13 +2,10 @@ import deepClone from 'rfdc/default';
 import { Readability } from '@mozilla/readability';
 import { DOMParser } from 'linkedom';
 import { enumerate } from 'pythonic';
+import PromisePool from '@supercharge/promise-pool';
 
 import type { BookmarkEntry, BookmarkDatabase, ScanBookmarksResults } from '~/src/interfaces/data-interfaces';
 import ProgressTracker from '~/src/utils/ProgressTracker';
-import { sanitizeContent } from '~/src/utils/string';
-import { delay } from '~/src/utils/promises';
-
-import PromisePool from '@supercharge/promise-pool';
 
 
 interface ParsedWebpageResult {
@@ -18,8 +15,30 @@ interface ParsedWebpageResult {
 }
 
 
+// Utility method to asynchronously sleep for X milliseconds
+export async function delay(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+// Utility method to clean up scraped text from Mozilla's readability libary
+export function sanitizeContent(text: string): string {
+  return text
+    .replaceAll('\\"', '"')
+    .replaceAll("\\'", '"')
+    .replaceAll('\\n', '  ')
+    .replaceAll('\\t', '  ')
+    .replaceAll(/\s+/g, ' ')
+    .trim();
+}
+
+
+// Service to manage text scraping from bookmark links
 export default class BookmarkScrapeEngine {
   static #instance: BookmarkScrapeEngine;
+
+  private readonly TEXT_SCRAPING_CONCURRENCY: number = 8;
+  private readonly CHECKPOINT_ITEM_FREQ: number = 10;
 
   private constructor() {}
 
@@ -32,6 +51,7 @@ export default class BookmarkScrapeEngine {
   }
 
 
+  // Recursively collect all bookmark links from a tree node, typically the root node
   _collectBookmarkLinks(node: chrome.bookmarks.BookmarkTreeNode, urls: string[]): void {
     if (node.children) {
       for (const subNode of node.children) {
@@ -43,6 +63,7 @@ export default class BookmarkScrapeEngine {
   }
 
 
+  // Parse the readable text content from an HTML string
   async _parseTextFromHtml(html: string) {
     const documentClone: any = new DOMParser().parseFromString(html, 'text/html');
     let parsedArticle;
@@ -63,6 +84,7 @@ export default class BookmarkScrapeEngine {
   }
 
 
+  // Create a Chrome tab to render and subsequently fetch its text content
   async _createAndExecuteTab<Result>(url: string, initialDelay: number, timeout: number, executorFunc: () => Promise<Result>) {
     const tab: chrome.tabs.Tab = await chrome.tabs.create({
       url: url,
@@ -74,10 +96,13 @@ export default class BookmarkScrapeEngine {
     // Wait for page to intially load (this prevents immediate closing of tab for <20% of websites)
     await delay(initialDelay);
 
+    // Set the tab to automatically close if it does not render by timeout (in ms)
     const autoCloseTabHandle = setTimeout(() => chrome.tabs.remove(tab.id), timeout);
     let scriptResult: Result | null;
 
     try {
+      // Inject the 'executorFunc' into the page being rendered when it's ready. When page rendering,
+      // injection and execution of injected function is completed, 'executeScript' will yield.
       const results = await chrome.scripting.executeScript<any, Promise<Result>>({
         injectImmediately: false,
         target: {
@@ -89,6 +114,7 @@ export default class BookmarkScrapeEngine {
         func: executorFunc,
       });
 
+      // If we finish the text extraction process early, close the tab early
       clearTimeout(autoCloseTabHandle);
       await chrome.tabs.remove(tab.id);
 
@@ -106,6 +132,7 @@ export default class BookmarkScrapeEngine {
   }
 
 
+  // The actual executor function being injected to fetch the HTML content to be serialized.
   async _scrapeTextContent(url: string): Promise<BookmarkEntry | null> {
     let webpageContent = await this._createAndExecuteTab(url, 5_000, 15_000, async (): Promise<ParsedWebpageResult | null> => {
       // function delay(ms) {
@@ -170,13 +197,14 @@ export default class BookmarkScrapeEngine {
   }
 
 
+  // Long running task to scrape changed links or all links from scratch
   async scanBookmarkLinks(
     oldBookmarkMapping: BookmarkDatabase,
     forceRefresh: boolean,
     onProgressUpdate: (progress: number) => Promise<void>,
     onCheckpointSave: (mappingCheckpoint: BookmarkDatabase) => Promise<void>,
   ): Promise<ScanBookmarksResults> {
-    // Collect new bookmark URLs
+    // Collect new bookmark URLs recursively
     const newBookmarkURLs = [];
     const rootNodes: chrome.bookmarks.BookmarkTreeNode[] = await chrome.bookmarks.getTree();
 
@@ -184,23 +212,29 @@ export default class BookmarkScrapeEngine {
       this._collectBookmarkLinks(subNode, newBookmarkURLs);
     }
 
+    // Make copy of bookmark mapping since original one will be mutated
     const bookmarkMappingCopy = deepClone(oldBookmarkMapping);
     // If force refresh is false, calculate change list based from existing bookmarks list
     // Otherwise assume that no old bookmark links exist
     const oldBookmarkURLs: string[] = forceRefresh ? [] : Object.keys(bookmarkMappingCopy);
 
+    // Create set objects for old and new URLs
     const oldUrlSet = new Set(oldBookmarkURLs);
     const newUrlSet = new Set(newBookmarkURLs);
 
+    // Calculate links to be added and removed (thanks to set theory)
     const linksAdded = newUrlSet.difference(oldUrlSet);
     const linksRemoved = oldUrlSet.difference(newUrlSet);
 
-    const progressTracker: ProgressTracker = new ProgressTracker(2, [0.1, 0.9]);
+    // Create a progress tracker object for the popup progress bar
+    // Links removed has update weight of 10% and links added has update weight of 90% due to computation effort
+    const progressTracker = new ProgressTracker(2, [0.1, 0.9]);
     const doProgressUpdate = async ({ removeProgress, addProgress }: { removeProgress: number, addProgress: number }) => {
       const progressValues: number[] = [removeProgress, addProgress];
       await onProgressUpdate(progressTracker.updateProgress(progressValues));
     }
 
+    // Reset progress to 0% overall
     await doProgressUpdate({
       addProgress: 0.0,
       removeProgress: 0.0,
@@ -211,7 +245,7 @@ export default class BookmarkScrapeEngine {
 
     const newBookmarkContentMapping = {};
 
-    // Remove old links
+    // Remove links that have been removed by user
     for (const [linkIndex, linkToRemove] of enumerate(linksRemoved)) {
       delete bookmarkMappingCopy[linkToRemove];
       await doProgressUpdate({
@@ -220,14 +254,13 @@ export default class BookmarkScrapeEngine {
       });
     }
 
+    // Set progress to 10% overall
     await doProgressUpdate({
       addProgress: 0.0,
       removeProgress: 1.0,
     });
 
-    // Fetch content for new links to add
 
-    // We want to process links in chunks of size 'n' and be able to do checkpoint saves after each chunk
     let itemsProcessed = 0;
     let self = this;
     async function scrapeTextFromLink(link: string): Promise<BookmarkEntry | null> {
@@ -238,32 +271,40 @@ export default class BookmarkScrapeEngine {
       console.log(`Processing ${link}...`);
       const entry = await self._scrapeTextContent(link);
 
+      // If text scraping from given link was successful, save the results
       if (!!entry) {
         newBookmarkContentMapping[entry.url] = entry;
         bookmarkMappingCopy[entry.url] = entry;
       }
 
       itemsProcessed += 1;
+      // Do a progress update for every new link processed (successfully or not)
       await doProgressUpdate({
         addProgress: (itemsProcessed + 1) / linksAdded.size,
         removeProgress: 1.0,
       });
 
-      if (itemsProcessed % 10 === 0) {
+      // Only emit a checkpoint database save every 'CHECKPOINT_ITEM_FREQ' times
+      if (itemsProcessed % this.CHECKPOINT_ITEM_FREQ === 0) {
         await onCheckpointSave(bookmarkMappingCopy);
       }
 
       return entry;
     }
 
+    // Fetch content for new links to add. This is done via a promise worker pool and concurrency
+    // set to 'TEXT_SCRAPING_CONCURRENCY' to ensure no single task halts the task queue.
     await PromisePool
       .for([...linksAdded])
-      .withConcurrency(8)
+      .withConcurrency(this.TEXT_SCRAPING_CONCURRENCY)
+      // NOTE: This is probably not needed, but doesn't hurt to have it for now...
       .useCorrespondingResults()
       .process(async (item, index, pool) => {
         return await scrapeTextFromLink(item);
       });
 
+
+    // Set progress to 100% overall
     await doProgressUpdate({
       addProgress: 1.0,
       removeProgress: 1.0,
