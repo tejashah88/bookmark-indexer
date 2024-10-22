@@ -38,7 +38,9 @@ export default class BookmarkSearchEngine {
   private index: FlexSearch.Document<BookmarkEntry, true>;
 
   private readonly SEARCH_LIMIT: number = 20;
-  private status: InitStatus = InitStatus.NOT_READY;
+
+  private _status: InitStatus = InitStatus.NOT_READY;
+  private readyListener: (value: boolean) => void | null;
 
   private constructor() {
     this.storage = LocalStorageService.instance;
@@ -79,6 +81,7 @@ export default class BookmarkSearchEngine {
       await this._addOrUpdateContent(bookmarkMapping);
 
       this.status = InitStatus.READY;
+      this.readyListener = null;
     }
   }
 
@@ -100,13 +103,38 @@ export default class BookmarkSearchEngine {
     });
 
     this.status = InitStatus.NOT_READY;
-
     await this.initialize();
   }
 
 
+  public get status(): InitStatus {
+    return this._status;
+  }
+
   public get isReady(): boolean {
-    return this.status == InitStatus.READY;
+    return this._status == InitStatus.READY;
+  }
+
+  public get hasReadyListener(): boolean {
+    return !!this.readyListener;
+  }
+
+
+  public set status(value: InitStatus) {
+    this._status = value;
+
+    if (this.hasReadyListener) {
+      this.readyListener(this.isReady);
+    }
+  }
+
+
+  subscribeOnReady(listener: (value: boolean) => void) {
+    this.readyListener = listener;
+  }
+
+  unsubscribeOnReady() {
+    this.readyListener = null;
   }
 
 

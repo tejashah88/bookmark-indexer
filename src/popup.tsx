@@ -9,20 +9,20 @@ import {
   InputRightElement,
   Spacer,
   Progress,
-  useToast
+  useToast,
+  CircularProgress
 } from '@chakra-ui/react';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { usePort } from "@plasmohq/messaging/hook";
-import { getPort, listen } from "@plasmohq/messaging/port";
 
-import { FaInfo, FaInfoCircle, FaSync, FaTrash, FaTrashAlt } from 'react-icons/fa';
-import { IoMdSettings } from 'react-icons/io';
+import { FaInfoCircle, FaSync, FaTrashAlt } from 'react-icons/fa';
 
 import SearchResults from '~/src/components/SearchResults';
 import type {
   ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody,
-  SearchBookmarksRequestBody, SearchBookmarksResponseBody
+  SearchBookmarksRequestBody, SearchBookmarksResponseBody,
+  SearchReadyRequestBody, SearchReadyResponseBody
 } from '~/src/interfaces/port-interfaces';
 import '~/src/popup.css';
 import LocalStorageService from './services/LocalStorageService';
@@ -45,18 +45,32 @@ async function TMP_fetchStorageInfo() {
 export default function PopupPage() {
   const [search, setSearch] = useState('');
 
-  const scanBookmarksPort = usePort<ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody>('ScrapeBookmarks');;
+  const scanBookmarksPort = usePort<ScrapeBookmarksRequestBody, ScrapeBookmarksResponseBody>('ScrapeBookmarks');
   const searchBookmarksPort = usePort<SearchBookmarksRequestBody, SearchBookmarksResponseBody>('SearchBookmarks');
+  const searchReadyPort = usePort<SearchReadyRequestBody, SearchReadyResponseBody>('SearchReady');
+
+  function listenToIsReady(): void {
+    searchReadyPort.send({ command: 'start' });
+  }
 
   function doSearchRequest(queryString: string): void {
     searchBookmarksPort.send({ queryString });
   }
 
+  const isSearchReady = typeof searchReadyPort.data !== 'undefined' && searchReadyPort.data?.isReady;
   const isBusy = typeof scanBookmarksPort.data !== 'undefined' && !scanBookmarksPort.data?.done;
   // HELP: This (searchBarIsEmpty) is apparently needed because even if the search results return an empty array from a
   // blank string, the SearchResults.tsx component is still trying to render?? (Could be a "dev" mode situation??)
   const searchBarIsEmpty = search.length > 0;
   const hasSearchResults = typeof searchBookmarksPort.data !== 'undefined' && searchBookmarksPort.data?.results.length > 0;
+
+  useEffect(() => {
+    listenToIsReady();
+
+    return () => {
+      BookmarkSearchEngine.instance.unsubscribeOnReady();
+    };
+  }, []);
 
   const toast = useToast();
 
@@ -159,8 +173,9 @@ export default function PopupPage() {
             <Button
               size="sm"
               onClick={() => doSearchRequest(search)}
+              disabled={!isSearchReady}
             >
-              Search
+              {isSearchReady ? 'Search' : <CircularProgress isIndeterminate size='20px'/>}
             </Button>
           </InputRightElement>
         </InputGroup>

@@ -18,3 +18,12 @@ export type SearchBookmarksResponseBody = {
   results: BookmarkEntry[];
   elapsedTime: number;
 }
+
+
+export type SearchReadyRequestBody = {
+  command: string;
+};
+
+export type SearchReadyResponseBody = {
+  isReady: boolean;
+}

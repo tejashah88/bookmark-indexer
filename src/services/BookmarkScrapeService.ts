@@ -6,7 +6,9 @@ import { enumerate } from 'pythonic';
 import type { BookmarkEntry, BookmarkDatabase, ScanBookmarksResults } from '~/src/interfaces/data-interfaces';
 import ProgressTracker from '~/src/utils/ProgressTracker';
 import { sanitizeContent } from '~/src/utils/string';
-import { delay, promiseAllInBatches } from '~src/utils/promises';
+import { delay } from '~/src/utils/promises';
+
+import PromisePool from '@supercharge/promise-pool';
 
 
 interface ParsedWebpageResult {
@@ -234,33 +236,33 @@ export default class BookmarkScrapeEngine {
         return null;
 
       console.log(`Processing ${link}...`);
-      const result = await self._scrapeTextContent(link);
+      const entry = await self._scrapeTextContent(link);
 
-      return result;
-    }
+      if (!!entry) {
+        newBookmarkContentMapping[entry.url] = entry;
+        bookmarkMappingCopy[entry.url] = entry;
+      }
 
-    async function onLinksBatchScraped(resultsBatch: BookmarkEntry[]) {
-      resultsBatch
-        .filter(entry => !!entry)
-        .forEach(entry => {
-          newBookmarkContentMapping[entry.url] = entry;
-          bookmarkMappingCopy[entry.url] = entry;
-        });
-
-      itemsProcessed += resultsBatch.length;
+      itemsProcessed += 1;
       await doProgressUpdate({
         addProgress: (itemsProcessed + 1) / linksAdded.size,
         removeProgress: 1.0,
       });
-      await onCheckpointSave(bookmarkMappingCopy);
+
+      if (itemsProcessed % 10 === 0) {
+        await onCheckpointSave(bookmarkMappingCopy);
+      }
+
+      return entry;
     }
 
-    await promiseAllInBatches<string, BookmarkEntry>(
-      [...linksAdded],
-      4,
-      scrapeTextFromLink,
-      onLinksBatchScraped,
-    );
+    await PromisePool
+      .for([...linksAdded])
+      .withConcurrency(8)
+      .useCorrespondingResults()
+      .process(async (item, index, pool) => {
+        return await scrapeTextFromLink(item);
+      });
 
     await doProgressUpdate({
       addProgress: 1.0,
