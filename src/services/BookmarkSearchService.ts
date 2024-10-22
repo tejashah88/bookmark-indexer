@@ -1,20 +1,12 @@
-
-import FlexSearch from 'flexsearch';
-
 import type {
   BookmarkEntry,
   BookmarkDatabase,
   ScanBookmarksResults,
+  BookmarkEntryWithScore,
 } from '~/src/interfaces/data-interfaces';
 
 import LocalStorageService from '~/src/services/LocalStorageService';
-import type { DocumentSearchResult } from 'flexsearch';
-
-
-interface FlexsearchFieldSearchResult<T> {
-  id: string | number;
-  doc: T;
-}
+import MiniSearch, { type SearchResult } from 'minisearch';
 
 
 enum InitStatus {
@@ -24,18 +16,11 @@ enum InitStatus {
 }
 
 
-declare module "flexsearch" {
-  interface Document<T, Store extends StoreOption = false> {
-    contain(id: Id): boolean;
-  }
-}
-
-
 export default class BookmarkSearchEngine {
   static #instance: BookmarkSearchEngine;
 
   private storage: LocalStorageService;
-  private index: FlexSearch.Document<BookmarkEntry, true>;
+  private index: MiniSearch<BookmarkEntry>;
 
   private readonly SEARCH_LIMIT: number = 20;
 
@@ -45,18 +30,18 @@ export default class BookmarkSearchEngine {
   private constructor() {
     this.storage = LocalStorageService.instance;
 
-    this.index = new FlexSearch.Document({
-      // preset: 'score',
-      language: 'en',
-      charset: 'latin:advanced',
-      tokenize: 'strict',// 'forward',
-      resolution: 3,
-      cache: 100,
-      document: {
-        id: 'url',
-        tag: false,
-        index: ['title', 'content'],
-        store: true,
+    this.index = new MiniSearch({
+      idField: 'url',
+      fields: ['title', 'content'],
+      storeFields: ['title', 'content'],
+      searchOptions: {
+        // Sets weights of importanct for scoring
+        boost: {
+          'title': 1,
+          'content': 1
+        },
+        combineWith: 'OR',
+        fuzzy: 0.2,
       }
     });
   }
@@ -78,7 +63,7 @@ export default class BookmarkSearchEngine {
 
       // Fetch the database and load it into the index
       const bookmarkMapping: BookmarkDatabase = await this.fetchDatabase();
-      await this._addOrUpdateContent(bookmarkMapping);
+      this._addOrUpdateContent(bookmarkMapping);
 
       this.status = InitStatus.READY;
       this.readyListener = null;
@@ -87,18 +72,18 @@ export default class BookmarkSearchEngine {
 
 
   async reinitialize(): Promise<void> {
-    this.index = new FlexSearch.Document({
-      // preset: 'score',
-      language: 'en',
-      charset: 'latin:advanced',
-      tokenize: 'strict',// 'forward',
-      resolution: 3,
-      cache: 100,
-      document: {
-        id: 'url',
-        tag: false,
-        index: ['title', 'content'],
-        store: true,
+    this.index = new MiniSearch({
+      idField: 'url',
+      fields: ['title', 'content'],
+      storeFields: ['title', 'content'],
+      searchOptions: {
+        // Sets weights of importanct for scoring
+        boost: {
+          'title': 1,
+          'content': 1
+        },
+        combineWith: 'AND',
+        fuzzy: 0.2,
       }
     });
 
@@ -171,12 +156,12 @@ export default class BookmarkSearchEngine {
   }
 
 
-  private async _addOrUpdateContent(data: BookmarkDatabase): Promise<void> {
+  private _addOrUpdateContent(data: BookmarkDatabase): void {
     for (const key of Object.keys(data)) {
-      if (this.index.contain(key)) {
-        await this.index.updateAsync(key, data[key])
+      if (this.index.has(key)) {
+        this.index.replace(data[key])
       } else {
-        await this.index.addAsync(key, data[key]);
+        this.index.add(data[key]);
       }
     }
   }
@@ -184,7 +169,7 @@ export default class BookmarkSearchEngine {
 
   private async _removeContent(keys: Array<string>): Promise<void> {
     for (const key of keys) {
-      await this.index.removeAsync(key);
+      this.index.discard(key);
     }
   }
 
@@ -193,56 +178,21 @@ export default class BookmarkSearchEngine {
   // Handle searching //
   //////////////////////
 
-  async searchBookmarks(searchText: string): Promise<BookmarkEntry[]> {
+  async searchBookmarks(searchText: string): Promise<BookmarkEntryWithScore[]> {
     // Perform search against bookmark entries
-    const searchResults: DocumentSearchResult<BookmarkEntry, true, true> = await this.index.searchAsync<true>({
-      query: searchText,
-      limit: this.SEARCH_LIMIT,
-      index: ['title', 'content'],
-      enrich: true,
-      bool: "or"
-    });
+    const searchRawResults: SearchResult[] = this.index.search(searchText);
 
-    // Extract entries based on each indexed field
-    const entriesByTitle: FlexsearchFieldSearchResult<BookmarkEntry>[] = (searchResults
-      .find(resultsChunk => resultsChunk.field === 'title') || { result: [] })
-      .result as FlexsearchFieldSearchResult<BookmarkEntry>[];
+    const searchResults: BookmarkEntryWithScore[] = searchRawResults
+      .slice(0, this.SEARCH_LIMIT)
+      .map(result => {
+        return {
+          url: result.id,
+          title: result.title,
+          content: result.content,
+          score: result.score,
+        } as BookmarkEntryWithScore
+      });
 
-
-    const entriesByContent: FlexsearchFieldSearchResult<BookmarkEntry>[] = (searchResults
-      .find(resultsChunk => resultsChunk.field === 'content') || { result: [] })
-      .result as FlexsearchFieldSearchResult<BookmarkEntry>[];
-
-
-    // Check that we have some results to show
-    const totalResults = entriesByTitle.length + entriesByContent.length;
-    if (totalResults === 0)
-      return [];
-
-    const urlsByTitle   = new Set(entriesByTitle.map(entry => entry.id));
-    const urlsByContent = new Set(entriesByContent.map(entry => entry.id));
-    const urlsByBoth    = urlsByTitle.intersection(urlsByContent);
-
-    // Sort search results in the following order, with ordering of all subsets of results preserved...
-    // 1. Matching title AND content
-    // 3. Matching title
-    // 2. Matching content
-
-    // NOTE: Sets preserve insertion order, which lets us insert subsets of results at a time
-    const orderedResultIds = [...new Set([
-      ...urlsByBoth,
-      ...urlsByTitle,
-      ...urlsByContent,
-    ])];
-
-    const results: BookmarkEntry[] = orderedResultIds
-      .map((id: string) => {
-        return  entriesByTitle.find(entry => entry.id === id)?.doc ||
-                entriesByContent.find(entry => entry.id === id)?.doc
-      })
-      // NOTE: This should NEVER yield undefined logically, but the safeguard is present because JavaScript.js...
-      .filter(entryDoc => !!entryDoc)
-
-    return results;
+    return searchResults;
   }
 }
